@@ -19,31 +19,77 @@ output:
 
 分别是样本(samples)和原始数据(quant.sf.gz)。
 样本主要包括我们实验的分组，测序名称，来源等关键信息。
-原始数据主要是我们实验得到的第一手数据，包括
+原始数据主要是我们实验得到的第一手数据，里面有成千上万的转录本，以及它们各自的估计计数值(NumReads)和有效长度(Effectivelength)
+
 ## 3. 核心流程：使用 tximport (手动组装)
 
 ### 3.1 理解关键概念
 
 #### 3.1.1 什么是丰度(Abundance)？
-* 这里记录下丰度是“多少”而不是“多大”。
-* 解释“长度偏见”（下雨和马路的比喻）。
+
+丰度(Abundance)是用来描述一个基因的相对真实的表达量是多少。它相较于原始计数(Raw Counts)，更能衡量一个基因相较于其他基因的转录量是大是小。
+原始计数值(Raw Counts)不能用于直接的比较，主要的原因有两点。
+  * 不同的样本的测序深度不同：如果样本A的总测序量(文库大小)是样本B的两倍，那么即使两个样本的表达比例相同，结果中样本A的表达量也会是样本B的两倍。
+  * 不同基因的长度不同：同一个样本里，较长的基因，其表达量会比较短的基因更多。这源于较长的基因更容易被测序读段(reads)选中，做个比喻，就像更长的马路更容易被下雨的雨滴击中一样。
+主要用于同一样本，不同基因间表达水平的比较。这种情况下，原始计数往往不能使用，比较的结果往往没有实际意义。而丰度则能很好的适用于该种情况，也是它的实际初衷。
+值得一提，同一基因，不同样本间表达水平的比较，虽然丰度也可以使用，但是会破坏数据的统计特征，导致结果不准确。此种情况使用原始计数与DESeq2等工具最合适。
 
 #### 3.1.2 什么是命名向量？
 * 记录下 `files` 向量和 `names(files)` 的作用。
+`files`向量是tximport函数必须的路径向量，其包含了所有原始数据(quant.sf.gz)所在的路径，并构成了一个单行的向量。
+`names(files)`可将`file`中的每个向量赋予名称，在数据导入过程中，它的目的是将file中的向量名称与tx2gene中的列名称一一对应，方便`tximport`函数进行查找和对应。
 
 ### 3.2 代码实战与详解
 
-这里放入我们讨论过的代码块，并在每个代码块前后用中文写下你的理解。
+
 
 ```{r setup, echo=TRUE}
-# 这里放加载包和准备文件的代码
-# 每一行都可以加上中文注释
-library("tximport")
-# ...
+#导入包和数据文件
+library("tximport")                                                 #导入tximport包
+library("readr")                                                    #导入readr包
+library("tximportData")                                             #导入tximportData包，提供后续的实例数据
+dir <- system.file("extdata", package="tximportData")               #从tximportData包中找到"extdata"数据的位置，并把该路径赋给dir变量
+samples <- read.table(file.path(dir,"samples.txt"), header=TRUE)    #利用`file.path`函数快速检索"samples"文件，并用`read.table`读取，赋给samples变量，`header=TRUE`意为首行为每列的名称
+samples$condition <- factor(rep(c("A","B"),each=3))                 #在samples表格里创建condition列，并用`factor`和`rep`函数创建分组"A"、"B"
+rownames(samples) <- samples$run                                    #将run列的内容赋成每行的名称
+samples[,c("pop","center","run","condition")]                       #展示samples的内容。[]中的内容，逗号左侧为选择行，空即为全选；逗号右侧为选择列。另外，pop意为Population (种群 / 族群)；center意为Sequencing Center(测序中心)；run 意为 Sequencing Run(测序批次 / 运行ID)。
+
 ```
+
+
+```{r preparation}
+#准备`tximport`函数需要的变量`files`,`tx2gene`以及
+files <- file.path(dir,"salmon", samples$run, "quant.sf.gz")        #创建files变量，并利用`file.path`函数快速生成了根据run列的值而拼凑成的路径向量。
+names(files) <- samples$run                                         #把run列的值赋给files中每个向量的名称，得到了我们需要的完整的files。
+tx2gene <- read_csv(file.path(dir, "tx2gene.gencode.v27.csv"))      #利用`read_csv`和`file.path`函数读取了"tx2gene.gencode.v27.csv"文件，创建了一个表格，并赋给了tx2gene变量。note that csv 代表着Comma-Separated Values(逗号分隔值)，意为以逗号作为分隔符。
+
+```
+
+```{r tximport}
+#使用`tximport`函数，清洗与汇总原始数据，得到我们想要的列表txi，包含丰度矩阵(abundance)，计数矩阵(counts)和有效长度矩阵(length)。其中矩阵的列名为样本(SRR···)，来自于files的行名；行名为基因(gene ID)，来自于tx2gene。
+#counts是最重要的结果，为差异分析校正过的基因水平计数值 (矩阵)，直接作为DESeq2、edgeR等软件的输入，进行差异表达分析。
+txi <- tximport(files, type="salmon", tx2gene=tx2gene)             #使用`tximport`函数，将之前备好的files路径向量输入，并提示数据为"salmon"格式，同时给出备好的tx2gene表格，其中是基因与转录本关系的查询字典。
+                                                                   
+```
+
+
+```{r getDESeqDataSet}
+#使用`DESeqDataSetFromTximport`函数，把刚才得到的"干净"的数据(计数矩阵)和样本信息表(samples)整合起来，并标识出我们关注的分组condition。
+#得到的数据结构为DESeqDataSet，方便进行后续的数据分析。
+library("DESeq2")                                                  #导入DESeq2包
+ddsTxi <- DESeqDataSetFromTximport(txi,                              
+                                   colData = samples,
+                                   design = ~ condition)           #使用`DESeqDataSetFromTximport`函数，把txi，samples输入，同时标识出condition为关注的分组变量。
+                                                                   #注意，这里会进行txi(计数矩阵)的列名与samples(样本信息表)的行名的严格比较，二者均是样本ID，必须一一对应才能通过。
+```
+
 
 ## 4. 进阶流程：使用 tximeta (自动组装)
 
 这里对比 `tximeta` 和 `tximport` 的区别，并解释 `SummarizedExperiment` 这个“数据保险箱”的概念。
+`tximeta`函数的作用是，将`tximport`复杂的准备步骤简化，删去了tx2gene的准备，改为函数内部自行上网查找相应的字典，同时把files和samples融入到同一个变量coldata里，同时把样本ID制作成一个单独的列names。
+之后`tximeta`函数只需要唯一的输入`coldata`，就能完成数据清洗和汇总，并把得到的counts, abundance和length、样本信息、基因信息一起打包成一个非常标准化的 `Bioconductor` 对象—— `SummarizedExperiment` (通常缩写为 `se`)。
+最后将`se`输入到`DESeqDataSetFromTximport`函数里，并标识出分组变量即可。
 
+值得一提的是，`SummarizedExperiment`是为了解决计数矩阵、样本信息表和基因信息表往往分开存在，不利于交接和操作的麻烦而创造的。自然它会包含以上的三种重要内容。
 ---
