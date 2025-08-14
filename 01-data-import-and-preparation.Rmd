@@ -11,15 +11,17 @@ output:
 ## 1. 核心问题：我们到底要解决什么？
 
 我们需要解决的根本问题是，生物学实验产生的原始测序数据是“杂乱”且“带有偏见”的，我们如何从中提取出“干净”且“有意义”的生物学信号？
-杂乱体现为，我们实验得到的第一手数据往往是非常分散，且有的是表达量数据，有的是样本数据，需要整理才能进行有效的分析。
-带有偏见体现为，原始的计数值收到了基因长度、测序深度、转录本异构体使用等多种技术因素的干扰。
-我们需要解决的直接问题是，如何把这些无法处理的数据转化为可以很方便处理的数据结构。
+  - 杂乱体现为，我们实验得到的第一手数据（例如，每个样本的转录本定量文件）与实验设计信息（例如，样本分组、处理条件）是分开存放的。我们需要将它们系统地组织和关联起来，才能进行有效的分析。
+  - 带有偏见体现为，原始的定量结果（通常称为原始计数 (Raw Counts)）受到了多种技术因素的干扰，使得它们不能直接用于样本间或基因间的比较。主要的偏见来源包括：
+    - 1.测序深度 (Sequencing Depth)：不同样本的总测序量（文库大小）不同。
+    - 2.基因/转录本长度 (Gene/Transcript Length)：在同一批测序中，更长的转录本理论上会产生更多的测序片段 (reads)。
+因此，我们需要解决的直接问题是：如何读取这些分散的原始定量文件，校正上述技术偏见，并将它们整合为一个适合下游差异表达分析的标准化数据结构。
 
 ## 2. 准备工作：两个核心“原材料”
 
-分别是样本(samples)和原始数据(quant.sf.gz)。
-样本主要包括我们实验的分组，测序名称，来源等关键信息。
-原始数据主要是我们实验得到的第一手数据，里面有成千上万的转录本，以及它们各自的估计计数值(NumReads)和有效长度(Effectivelength)
+分别是样本元数据 (Sample Metadata) 和原始定量文件 (Quantification Files)。
+  - 样本元数据：通常是一个表格（如samples.txt），记录了每个样本的关键信息，如实验分组（例如，对照组 vs. 处理组）、测序ID (run ID)、生物学重复等。这是我们连接实验设计与定量数据的“蓝图”。
+  - 原始定量文件：这些是由上游定量软件（如 Salmon, Kallisto, Sailfish）生成的。每个样本对应一个文件（如此处的quant.sf.gz）。文件内包含了成千上万的转录本 (transcripts)，以及它们各自的估计计数值 (NumReads) 和有效长度 (EffectiveLength)。
 
 ## 3. 核心流程：使用 tximport (手动组装)
 
@@ -28,16 +30,21 @@ output:
 #### 3.1.1 什么是丰度(Abundance)？
 
 丰度(Abundance)是用来描述一个基因的相对真实的表达量是多少。它相较于原始计数(Raw Counts)，更能衡量一个基因相较于其他基因的转录量是大是小。
-原始计数值(Raw Counts)不能用于直接的比较，主要的原因有两点。
+
+原始计数值(Raw Counts)不能用于直接比较，主要原因有两点：
   * 不同的样本的测序深度不同：如果样本A的总测序量(文库大小)是样本B的两倍，那么即使两个样本的表达比例相同，结果中样本A的表达量也会是样本B的两倍。
   * 不同基因的长度不同：同一个样本里，较长的基因，其表达量会比较短的基因更多。这源于较长的基因更容易被测序读段(reads)选中，做个比喻，就像更长的马路更容易被下雨的雨滴击中一样。
-主要用于同一样本，不同基因间表达水平的比较。这种情况下，原始计数往往不能使用，比较的结果往往没有实际意义。而丰度则能很好的适用于该种情况，也是它的实际初衷。
-值得一提，同一基因，不同样本间表达水平的比较，虽然丰度也可以使用，但是会破坏数据的统计特征，导致结果不准确。此种情况使用原始计数与DESeq2等工具最合适。
+
+为了解决这些问题，生物信息学家提出了**“丰度 (Abundance)”** 的概念，例如 TPM (Transcripts Per Million) 或 FPKM。丰度是经过标准化的值，它同时校正了测序深度和基因长度。
+  - 丰度的主要用途：比较同一样本内，不同基因间的表达水平高低。例如，在样本A中，基因X的TPM值是否高于基因Y？
+  - 丰度的局限性：不推荐直接用于不同样本间，同一基因的差异表达分析（如DESeq2）。因为将原始计数转换为TPM等浮点数的过程，会改变数据的统计特性（如方差分布），不符合DESeq2等工具所依赖的离散型概率分布模型（如负二项分布）。
+
+tximport的巧妙之处在于，它可以在导入数据的同时，利用转录本的长度信息，生成既校正了长度偏差、又保持了原始计数尺度的“伪计数” (scaled counts)，这正是DESeq2等工具最理想的输入。
 
 #### 3.1.2 什么是命名向量？
-* 记录下 `files` 向量和 `names(files)` 的作用。
-`files`向量是tximport函数必须的路径向量，其包含了所有原始数据(quant.sf.gz)所在的路径，并构成了一个单行的向量。
-`names(files)`可将`file`中的每个向量赋予名称，在数据导入过程中，它的目的是将file中的向量名称与tx2gene中的列名称一一对应，方便`tximport`函数进行查找和对应。
+files 向量是一个字符向量，其中每个元素都是一个quant.sf.gz文件的完整路径。tximport需要通过它来定位所有待处理的原始数据文件。
+
+names(files) 为files向量中的每一个路径赋予一个唯一的标识符（通常是样本名，如SRR123456）。tximport会使用这些名字作为最终输出矩阵（如txi$counts）的列名。这一步至关重要，它确保了输出矩阵的列能够与样本元数据表（samples）的行一一对应。
 
 ### 3.2 代码实战与详解
 
@@ -50,25 +57,38 @@ library("readr")                                                    #导入readr
 library("tximportData")                                             #导入tximportData包，提供后续的实例数据
 dir <- system.file("extdata", package="tximportData")               #从tximportData包中找到"extdata"数据的位置，并把该路径赋给dir变量
 samples <- read.table(file.path(dir,"samples.txt"), header=TRUE)    #利用`file.path`函数快速检索"samples"文件，并用`read.table`读取，赋给samples变量，`header=TRUE`意为首行为每列的名称
-samples$condition <- factor(rep(c("A","B"),each=3))                 #在samples表格里创建condition列，并用`factor`和`rep`函数创建分组"A"、"B"
-rownames(samples) <- samples$run                                    #将run列的内容赋成每行的名称
-samples[,c("pop","center","run","condition")]                       #展示samples的内容。[]中的内容，逗号左侧为选择行，空即为全选；逗号右侧为选择列。另外，pop意为Population (种群 / 族群)；center意为Sequencing Center(测序中心)；run 意为 Sequencing Run(测序批次 / 运行ID)。
-
+samples$condition <- factor(rep(c("A","B"),each=3))                 #在samples表格里创建condition列，并用`factor`和`rep`函数创建分组"A"、"B"# 在samples数据框中新增一列'condition'。
+                                                                      # `rep(c("A","B"), each=3)` 生成 ("A","A","A","B","B","B")，代表前3个样本为A组，后3个为B组。
+                                                                      # `factor()` 将其转换为因子类型，这是R中进行统计建模（如差异分析）的标准做法。
+rownames(samples) <- samples$run                                    # 将'run'列（即SRR开头的样本ID）设为数据框的行名。
+                                                                      # 这样做是为了方便后续将样本信息(samples)与定量数据(txi)进行匹配。
+samples[,c("pop","center","run","condition")]                       # 展示samples数据框的特定列，确认我们的设置是否正确。
+                                                                      # []中逗号前为空，代表选择所有行。
 ```
 
 
 ```{r preparation}
 #准备`tximport`函数需要的变量`files`,`tx2gene`以及
 files <- file.path(dir,"salmon", samples$run, "quant.sf.gz")        #创建files变量，并利用`file.path`函数快速生成了根据run列的值而拼凑成的路径向量。
-names(files) <- samples$run                                         #把run列的值赋给files中每个向量的名称，得到了我们需要的完整的files。
-tx2gene <- read_csv(file.path(dir, "tx2gene.gencode.v27.csv"))      #利用`read_csv`和`file.path`函数读取了"tx2gene.gencode.v27.csv"文件，创建了一个表格，并赋给了tx2gene变量。note that csv 代表着Comma-Separated Values(逗号分隔值)，意为以逗号作为分隔符。
+names(files) <- samples$run                                         # 为files路径向量命名。每个文件的路径现在都有一个对应的样本名（来自samples$run）。
+                                                                      # 这是连接`files`和`samples`的关键一步
+tx2gene <- read_csv(file.path(dir, "tx2gene.gencode.v27.csv"))     # 读取转录本ID到基因ID的映射文件。
+                                                                      # 这是一个两列的表格：第一列是转录本ID，第二列是对应的基因ID。
+                                                                      # `tximport`将使用这个“字典”来将转录本水平的定量结果汇总(summarize)到基因水平。note that csv 代表着Comma-Separated Values(逗号分隔值)，意为以逗号作为分隔符。
 
 ```
 
 ```{r tximport}
 #使用`tximport`函数，清洗与汇总原始数据，得到我们想要的列表txi，包含丰度矩阵(abundance)，计数矩阵(counts)和有效长度矩阵(length)。其中矩阵的列名为样本(SRR···)，来自于files的行名；行名为基因(gene ID)，来自于tx2gene。
 #counts是最重要的结果，为差异分析校正过的基因水平计数值 (矩阵)，直接作为DESeq2、edgeR等软件的输入，进行差异表达分析。
-txi <- tximport(files, type="salmon", tx2gene=tx2gene)             #使用`tximport`函数，将之前备好的files路径向量输入，并提示数据为"salmon"格式，同时给出备好的tx2gene表格，其中是基因与转录本关系的查询字典。
+
+txi <- tximport(files, type="salmon", tx2gene=tx2gene)           # 执行核心的导入与汇总步骤。  
+# `type="salmon"`: 告知函数这些是Salmon软件的输出。
+# `tx2gene=tx2gene`: 提供转录本-基因映射表，指示函数将结果汇总到基因水平。
+# 结果`txi`是一个列表，包含三个核心矩阵：
+#   - txi$abundance: 丰度矩阵 (TPM)
+#   - txi$counts: 用于差异分析的校正后计数矩阵
+#   - txi$length: 校正中使用的基因有效长度矩阵
                                                                    
 ```
 
@@ -76,20 +96,47 @@ txi <- tximport(files, type="salmon", tx2gene=tx2gene)             #使用`tximp
 ```{r getDESeqDataSet}
 #使用`DESeqDataSetFromTximport`函数，把刚才得到的"干净"的数据(计数矩阵)和样本信息表(samples)整合起来，并标识出我们关注的分组condition。
 #得到的数据结构为DESeqDataSet，方便进行后续的数据分析。
+
 library("DESeq2")                                                  #导入DESeq2包
 ddsTxi <- DESeqDataSetFromTximport(txi,                              
                                    colData = samples,
-                                   design = ~ condition)           #使用`DESeqDataSetFromTximport`函数，把txi，samples输入，同时标识出condition为关注的分组变量。
-                                                                   #注意，这里会进行txi(计数矩阵)的列名与samples(样本信息表)的行名的严格比较，二者均是样本ID，必须一一对应才能通过。
+                                   design = ~ condition)           
+
+# `colData = samples`: `colData`代表列的元数据（Column Metadata）。这里我们将样本信息表`samples`传递给它。
+#  函数会严格检查`txi$counts`的列名是否与`colData`（即samples）的行名完全一致且顺序相同。这是确保数据和设计正确匹配的关键。
+# `design = ~ condition`: 指定实验设计公式。`~ condition`表示我们希望研究的差异是由于`condition`列中的分组（A vs B）引起的。
+# `ddsTxi`就是我们最终得到的DESeqDataSet对象，一个整合了计数数据、样本信息和实验设计的“数据保险箱”。
+
 ```
 
 
 ## 4. 进阶流程：使用 tximeta (自动组装)
 
-这里对比 `tximeta` 和 `tximport` 的区别，并解释 `SummarizedExperiment` 这个“数据保险箱”的概念。
-`tximeta`函数的作用是，将`tximport`复杂的准备步骤简化，删去了tx2gene的准备，改为函数内部自行上网查找相应的字典，同时把files和samples融入到同一个变量coldata里，同时把样本ID制作成一个单独的列names。
-之后`tximeta`函数只需要唯一的输入`coldata`，就能完成数据清洗和汇总，并把得到的counts, abundance和length、样本信息、基因信息一起打包成一个非常标准化的 `Bioconductor` 对象—— `SummarizedExperiment` (通常缩写为 `se`)。
-最后将`se`输入到`DESeqDataSetFromTximport`函数里，并标识出分组变量即可。
+tximeta 是 tximport 的一个“智能升级版”，它旨在将手动准备步骤自动化，让流程更简单、结果更可复现。
+核心区别与优势：
+  1.自动获取元数据：tximeta最大的魔力在于，它能通过分析定量文件（quant.sf.gz）的头部信息，自动识别出所使用的参考转录组版本（如GENCODE v27），然后自动从网上下载对应的tx2gene映射文件。这省去了手动寻找和准备tx2gene的繁琐步骤。
+  2.整合输入：它不再需要分开的files和samples对象。你只需创建一个包含样本信息和文件路径的coldata数据框。
+  3.标准化的输出对象：tximeta的输出直接就是一个SummarizedExperiment对象（缩写为se）。
+
+理解SummarizedExperiment：“数据保险箱”
+
+SummarizedExperiment是Bioconductor项目定义的一种标准数据结构，专门用于存储基因组学实验数据。您可以把它想象成一个高度整合的“数据保险箱”，里面整齐地存放着：
+  - 定量数据 (Assays)：一个或多个矩阵，如计数、TPM等。可以通过assay(se, "counts")来提取。
+  - 样本元数据 (Column Data)：关于样本（列）的信息。可以通过colData(se)来提取。
+  - 基因/特征元数据 (Row Data)：关于基因（行）的信息，如基因坐标、GC含量等。可以通过rowData(se)来提取。
+这种结构的好处是，数据、样本信息和基因信息被永久绑定在一起，避免了在传递和分析过程中三者错配的风险，极大地增强了分析的可重复性。
+使用tximeta后，从se对象到DESeqDataSet的转换也只需一步，因为DESeqDataSet本身就是SummarizedExperiment的一种扩展形式。
 
 值得一提的是，`SummarizedExperiment`是为了解决计数矩阵、样本信息表和基因信息表往往分开存在，不利于交接和操作的麻烦而创造的。自然它会包含以上的三种重要内容。
+
+
+## 5. 流程图
+多个 quant.sf.gz 文件 + samples.txt (元数据) + tx2gene.csv (注释)
+      ↓ (tximport / tximeta)
+整合的计数矩阵 (txi / SummarizedExperiment)
+      ↓ (DESeqDataSetFromTximport)
+DESeqDataSet 对象 (数据 + 元数据 + 设计公式)
+      ↓
+下游差异表达分析
+
 ---
